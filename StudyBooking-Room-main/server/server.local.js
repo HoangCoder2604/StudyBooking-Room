@@ -1,33 +1,67 @@
+const http = require('node:http');
+const path = require('node:path');
 const crypto = require('node:crypto');
-const { createClient } = require('@libsql/client');
+const { DatabaseSync } = require('node:sqlite');
+const { WebSocketServer } = require('ws');
 
+const PORT = Number(process.env.PORT || 4000);
 const TOKEN_SECRET = process.env.TOKEN_SECRET || 'study-room-local-development-secret';
-const TURSO_DATABASE_URL = process.env.TURSO_DATABASE_URL;
-const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN;
+const db = new DatabaseSync(path.join(__dirname, 'studyroom.db'));
 
-if (!TURSO_DATABASE_URL || !TURSO_AUTH_TOKEN) {
-  console.warn('TURSO_DATABASE_URL/TURSO_AUTH_TOKEN are not set. The Vercel API requires Turso.');
-}
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA foreign_keys = ON;
+  PRAGMA busy_timeout = 5000;
 
-const db = createClient({ url: TURSO_DATABASE_URL || 'file:./server/studyroom.db', authToken: TURSO_AUTH_TOKEN });
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    student_id TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'student',
+    notifications_enabled INTEGER NOT NULL DEFAULT 1,
+    theme TEXT NOT NULL DEFAULT 'light',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
 
-async function exec(sql, args = []) { return db.execute({ sql, args }); }
-async function get(sql, args = []) { const r = await exec(sql, args); return r.rows[0] || undefined; }
-async function all(sql, args = []) { const r = await exec(sql, args); return r.rows; }
-async function run(sql, args = []) { return exec(sql, args); }
+  CREATE TABLE IF NOT EXISTS rooms (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    location TEXT NOT NULL,
+    building TEXT NOT NULL,
+    floor INTEGER NOT NULL,
+    capacity INTEGER NOT NULL,
+    size TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    facilities TEXT NOT NULL,
+    description TEXT NOT NULL
+  );
 
-let initPromise;
-async function initDb() {
-  const statements = [
-`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, student_id TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student', notifications_enabled INTEGER NOT NULL DEFAULT 1, theme TEXT NOT NULL DEFAULT 'light', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
-`CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, name TEXT NOT NULL, location TEXT NOT NULL, building TEXT NOT NULL, floor INTEGER NOT NULL, capacity INTEGER NOT NULL, size TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', facilities TEXT NOT NULL, description TEXT NOT NULL)`,
-`CREATE TABLE IF NOT EXISTS bookings (id TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id), user_id INTEGER NOT NULL REFERENCES users(id), date TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, purpose TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'confirmed', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, cancelled_at TEXT)`,
-`CREATE INDEX IF NOT EXISTS idx_booking_conflict ON bookings(room_id, date, status, start_time, end_time)`,
-`CREATE TABLE IF NOT EXISTS push_tokens (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, platform TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`
-  ];
-  for (const sql of statements) await exec(sql);
-}
-function ensureDb() { if (!initPromise) initPromise = initDb().then(seedRooms).then(seedUsers); return initPromise; }
+  CREATE TABLE IF NOT EXISTS bookings (
+    id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL REFERENCES rooms(id),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    date TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'confirmed',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    cancelled_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_booking_conflict
+  ON bookings(room_id, date, status, start_time, end_time);
+
+  CREATE TABLE IF NOT EXISTS push_tokens (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    platform TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+`);
 
 const rooms = [
   ['R001', 'Room A101', 'Building A - Floor 1', 'Building A', 1, 20, 'Medium', 'active', ['Projector', 'WiFi', 'Air Conditioner', 'Whiteboard'], 'A bright study room for group discussion, presentations, and project work.'],
@@ -38,7 +72,12 @@ const rooms = [
   ['R006', 'Room C103', 'Building C - Floor 1', 'Building C', 1, 16, 'Medium', 'active', ['Projector', 'WiFi', 'Whiteboard'], 'Comfortable classroom for medium-sized project teams and meetings.']
 ];
 
-async function seedRooms() { for (const room of rooms) await run(`INSERT OR IGNORE INTO rooms (id,name,location,building,floor,capacity,size,status,facilities,description) VALUES (?,?,?,?,?,?,?,?,?,?)`, [...room.slice(0,8), JSON.stringify(room[8]), room[9]]); }
+const insertRoom = db.prepare(`
+  INSERT OR IGNORE INTO rooms
+  (id, name, location, building, floor, capacity, size, status, facilities, description)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+for (const room of rooms) insertRoom.run(...room.slice(0, 8), JSON.stringify(room[8]), room[9]);
 
 function passwordHash(password, salt = crypto.randomBytes(16).toString('hex')) {
   return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`;
@@ -51,7 +90,9 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(actual, Buffer.from(hash, 'hex'));
 }
 
-async function seedUsers() { await run('INSERT OR IGNORE INTO users (name, student_id, email, password_hash) VALUES (?, ?, ?, ?)', ['Nguyen Van Hoang','23IT.B065','student@example.com',passwordHash('123456')]); await run('INSERT OR IGNORE INTO users (name, student_id, email, password_hash) VALUES (?, ?, ?, ?)', ['Tran Minh Anh','23IT.B066','student2@example.com',passwordHash('123456')]); }
+const seedUser = db.prepare('INSERT OR IGNORE INTO users (name, student_id, email, password_hash) VALUES (?, ?, ?, ?)');
+seedUser.run('Nguyen Van Hoang', '23IT.B065', 'student@example.com', passwordHash('123456'));
+seedUser.run('Tran Minh Anh', '23IT.B066', 'student2@example.com', passwordHash('123456'));
 
 function signToken(user) {
   const payload = Buffer.from(JSON.stringify({ id: user.id, exp: Date.now() + 7 * 86400000 })).toString('base64url');
@@ -111,10 +152,14 @@ async function body(req) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-async function roomDto(row, slot) {
+function roomDto(row, slot) {
   let available = row.status === 'active';
   if (available && slot.date && slot.startTime && slot.endTime) {
-    available = !(await get(`SELECT 1 FROM bookings WHERE room_id = ? AND date = ? AND status = 'confirmed' AND start_time < ? AND end_time > ? LIMIT 1`, [row.id, slot.date, slot.endTime, slot.startTime]));
+    available = !db.prepare(`
+      SELECT 1 FROM bookings
+      WHERE room_id = ? AND date = ? AND status = 'confirmed'
+        AND start_time < ? AND end_time > ? LIMIT 1
+    `).get(row.id, slot.date, slot.endTime, slot.startTime);
   }
   return {
     ...row,
@@ -149,7 +194,8 @@ const bookingSelect = `
 let broadcastEvent = () => {};
 
 async function sendExpoPush(userId, title, message, data = {}) {
-  const tokens = (await all(`SELECT p.token FROM push_tokens p JOIN users u ON u.id = p.user_id WHERE p.user_id = ? AND u.notifications_enabled = 1`, [userId])).map(row => row.token);
+  const tokens = db.prepare(`SELECT p.token FROM push_tokens p JOIN users u ON u.id = p.user_id
+    WHERE p.user_id = ? AND u.notifications_enabled = 1`).all(userId).map(row => row.token);
   if (!tokens.length) return;
   try {
     await fetch('https://exp.host/--/api/v2/push/send', {
@@ -162,8 +208,8 @@ async function sendExpoPush(userId, title, message, data = {}) {
   }
 }
 
-async function releaseExpiredBookings() {
-  const expired = await all(`
+function releaseExpiredBookings() {
+  const expired = db.prepare(`
     UPDATE bookings
     SET status = 'completed'
     WHERE status = 'confirmed'
@@ -181,21 +227,22 @@ async function releaseExpiredBookings() {
   return expired.length;
 }
 
+releaseExpiredBookings();
+const expiryTimer = setInterval(releaseExpiredBookings, 30000);
+expiryTimer.unref();
 
-async function handler(req, res) {
+const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
-  const url = new URL(req.url || '/', `https://${req.headers.host || 'vercel.local'}`);
-
-  await ensureDb();
+  const url = new URL(req.url, `http://${req.headers.host}`);
 
   try {
     if (req.method === 'GET' && url.pathname === '/api/health') {
-      return send(res, 200, { ok: true, database: 'turso', time: new Date().toISOString() });
+      return send(res, 200, { ok: true, database: 'sqlite', time: new Date().toISOString() });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/auth/login') {
       const input = await body(req);
-      const user = await get('SELECT * FROM users WHERE lower(email) = lower(?)', [String(input.email || '').trim()]);
+      const user = db.prepare('SELECT * FROM users WHERE lower(email) = lower(?)').get(String(input.email || '').trim());
       if (!user || !verifyPassword(String(input.password || ''), user.password_hash)) {
         return send(res, 401, { message: 'Email hoặc mật khẩu không đúng.' });
       }
@@ -212,8 +259,9 @@ async function handler(req, res) {
         return send(res, 400, { message: 'Vui lòng nhập đủ thông tin; mật khẩu tối thiểu 6 ký tự.' });
       }
       try {
-        const result = await run('INSERT INTO users (name, student_id, email, password_hash) VALUES (?, ?, ?, ?)', [name, studentId, email, passwordHash(password)]);
-        const user = await get('SELECT * FROM users WHERE id = ?', [result.lastInsertRowid]);
+        const result = db.prepare('INSERT INTO users (name, student_id, email, password_hash) VALUES (?, ?, ?, ?)')
+          .run(name, studentId, email, passwordHash(password));
+        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
         return send(res, 201, { token: signToken(user), user: publicUser(user) });
       } catch (error) {
         if (String(error.message).includes('UNIQUE')) return send(res, 409, { message: 'Email hoặc mã sinh viên đã được sử dụng.' });
@@ -223,9 +271,9 @@ async function handler(req, res) {
 
     const session = readToken(req);
     if (!session) return send(res, 401, { message: 'Phiên đăng nhập đã hết hạn.' });
-    const user = await get('SELECT * FROM users WHERE id = ?', [session.id]);
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(session.id);
     if (!user) return send(res, 401, { message: 'Tài khoản không tồn tại.' });
-    await releaseExpiredBookings();
+    releaseExpiredBookings();
 
     if (req.method === 'GET' && url.pathname === '/api/me') return send(res, 200, { user: publicUser(user) });
 
@@ -233,15 +281,17 @@ async function handler(req, res) {
       const input = await body(req);
       const enabled = input.notificationsEnabled == null ? user.notifications_enabled : Number(Boolean(input.notificationsEnabled));
       const theme = ['light', 'dark', 'system'].includes(input.theme) ? input.theme : user.theme;
-      await run('UPDATE users SET notifications_enabled = ?, theme = ? WHERE id = ?', [enabled, theme, user.id]);
-      return send(res, 200, { user: publicUser(await get('SELECT * FROM users WHERE id = ?', [user.id])) });
+      db.prepare('UPDATE users SET notifications_enabled = ?, theme = ? WHERE id = ?').run(enabled, theme, user.id);
+      return send(res, 200, { user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)) });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/push-tokens') {
       const input = await body(req);
       const pushToken = String(input.token || '').trim();
       if (!/^ExponentPushToken\[.+\]$|^ExpoPushToken\[.+\]$/.test(pushToken)) return send(res, 400, { message:'Push token không hợp lệ.' });
-      await run(`INSERT INTO push_tokens (token,user_id,platform,updated_at) VALUES (?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id,platform=excluded.platform,updated_at=CURRENT_TIMESTAMP`, [pushToken,user.id,String(input.platform || 'unknown')]);
+      db.prepare(`INSERT INTO push_tokens (token,user_id,platform,updated_at) VALUES (?,?,?,CURRENT_TIMESTAMP)
+        ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id,platform=excluded.platform,updated_at=CURRENT_TIMESTAMP`)
+        .run(pushToken,user.id,String(input.platform || 'unknown'));
       return send(res, 201, { ok:true });
     }
 
@@ -260,7 +310,8 @@ async function handler(req, res) {
       const status = url.searchParams.get('status') || 'All';
       const facility = url.searchParams.get('facility') || 'All';
       const minCapacity = Number(url.searchParams.get('minCapacity') || 0);
-      const result = (await Promise.all((await all('SELECT * FROM rooms ORDER BY name')).map((row) => roomDto(row, slot))))
+      const result = db.prepare('SELECT * FROM rooms ORDER BY name').all()
+        .map((row) => roomDto(row, slot))
         .filter((room) => !q || `${room.name} ${room.location}`.toLowerCase().includes(q))
         .filter((room) => size === 'All' || room.size === size)
         .filter((room) => building === 'All' || room.building === building)
@@ -271,7 +322,7 @@ async function handler(req, res) {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/bookings') {
-      const rows = await all(`${bookingSelect} WHERE b.user_id = ? ORDER BY b.date DESC, b.start_time DESC`, [user.id]);
+      const rows = db.prepare(`${bookingSelect} WHERE b.user_id = ? ORDER BY b.date DESC, b.start_time DESC`).all(user.id);
       return send(res, 200, { bookings: rows.map(bookingDto) });
     }
 
@@ -288,44 +339,47 @@ async function handler(req, res) {
         return send(res, 400, { message: 'Không thể đặt một khung giờ đã bắt đầu hoặc đã kết thúc.' });
       }
 
+      db.exec('BEGIN IMMEDIATE');
       try {
-        const room = await get('SELECT * FROM rooms WHERE id = ?', [roomId]);
+        const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(roomId);
         if (!room || room.status !== 'active') {
+          db.exec('ROLLBACK');
           return send(res, 409, { message: 'Phòng hiện không hoạt động.' });
         }
-        const conflict = await get(`
+        const conflict = db.prepare(`
           SELECT id FROM bookings
           WHERE room_id = ? AND date = ? AND status = 'confirmed'
             AND start_time < ? AND end_time > ? LIMIT 1
-        `, [roomId, date, endTime, startTime]);
+        `).get(roomId, date, endTime, startTime);
         if (conflict) {
+          db.exec('ROLLBACK');
           return send(res, 409, { code: 'BOOKING_CONFLICT', message: 'Phòng vừa được người khác đặt trong khung giờ này. Vui lòng chọn giờ hoặc phòng khác.' });
         }
         const id = `BK-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
-        await run(`
+        db.prepare(`
           INSERT INTO bookings (id, room_id, user_id, date, start_time, end_time, purpose, note)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `, [id, roomId, user.id, date, startTime, endTime, String(input.purpose || 'Study').trim(), String(input.note || '').trim()]);
-
-        const created = await get(`${bookingSelect} WHERE b.id = ?`, [id]);
+        `).run(id, roomId, user.id, date, startTime, endTime, String(input.purpose || 'Study').trim(), String(input.note || '').trim());
+        db.exec('COMMIT');
+        const created = db.prepare(`${bookingSelect} WHERE b.id = ?`).get(id);
         const event = { type:'booking_created', userId:user.id, bookingId:id, roomId, title:'Đặt phòng thành công', message:`${room.name} · ${date} · ${startTime}-${endTime}` };
         broadcastEvent({ type:'rooms_updated', reason:'booking_created', roomId });
         broadcastEvent(event, user.id);
         sendExpoPush(user.id, event.title, event.message, { bookingId:id, type:event.type });
         return send(res, 201, { booking: bookingDto(created) });
       } catch (error) {
-
+        try { db.exec('ROLLBACK'); } catch {}
         throw error;
       }
     }
 
     const cancelMatch = url.pathname.match(/^\/api\/bookings\/([^/]+)\/cancel$/);
     if (req.method === 'PATCH' && cancelMatch) {
-      const result = await run(`
+      const result = db.prepare(`
         UPDATE bookings SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP
         WHERE id = ? AND user_id = ? AND status = 'confirmed'
-      `, [decodeURIComponent(cancelMatch[1]), user.id]);
-      if (!result.rowsAffected) return send(res, 404, { message: 'Không tìm thấy booking đang hoạt động.' });
+      `).run(decodeURIComponent(cancelMatch[1]), user.id);
+      if (!result.changes) return send(res, 404, { message: 'Không tìm thấy booking đang hoạt động.' });
       const event = { type:'booking_cancelled', userId:user.id, bookingId:decodeURIComponent(cancelMatch[1]), title:'Booking đã hủy', message:'Booking của bạn đã được hủy và phòng đã được giải phóng.' };
       broadcastEvent({ type:'rooms_updated', reason:'booking_cancelled' });
       broadcastEvent(event, user.id);
@@ -334,7 +388,7 @@ async function handler(req, res) {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/notifications') {
-      const rows = await all(`${bookingSelect} WHERE b.user_id = ? ORDER BY b.created_at DESC LIMIT 30`, [user.id]);
+      const rows = db.prepare(`${bookingSelect} WHERE b.user_id = ? ORDER BY b.created_at DESC LIMIT 30`).all(user.id);
       const notifications = rows.map((item) => ({
         id: `notification-${item.id}`,
         title: item.status === 'cancelled' ? 'Booking đã hủy' : item.status === 'completed' ? 'Booking đã hoàn thành' : 'Đặt phòng thành công',
@@ -350,6 +404,28 @@ async function handler(req, res) {
     console.error(error);
     return send(res, 500, { message: 'Máy chủ gặp lỗi. Vui lòng thử lại.' });
   }
-}
+});
 
-module.exports = handler;
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`StudyRoom API running at http://localhost:${PORT}`);
+});
+
+const sockets = new WebSocketServer({ noServer:true });
+server.on('upgrade', (request, socket, head) => {
+  const url = new URL(request.url, `http://${request.headers.host}`);
+  const session = url.pathname === '/ws' ? verifyToken(url.searchParams.get('token') || '') : null;
+  if (!session) return socket.destroy();
+  sockets.handleUpgrade(request, socket, head, (client) => {
+    client.userId = session.id;
+    sockets.emit('connection', client, request);
+  });
+});
+
+broadcastEvent = (event, userId = null) => {
+  const payload = JSON.stringify(event);
+  for (const client of sockets.clients) {
+    if (client.readyState === 1 && (userId == null || client.userId === userId)) client.send(payload);
+  }
+};
+
+sockets.on('connection', (client) => client.send(JSON.stringify({ type:'connected' })));

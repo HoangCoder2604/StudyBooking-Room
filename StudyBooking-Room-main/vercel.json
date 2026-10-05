@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "buildCommand": "npx expo export -p web",
+  "outputDirectory": "dist",
+  "functions": {
+    "server.js": {
+      "includeFiles": ["server/**"]
+    }
+  }
+}

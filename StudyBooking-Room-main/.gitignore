@@ -1,0 +1,9 @@
+node_modules/
+.expo/
+.expo-test-export/
+.expo-web-test/
+.expo-android-test/
+dist/
+server/*.db
+server/*.db-shm
+server/*.db-wal

@@ -1,30 +1,32 @@
-# StudyBooking-Room — Vercel deployment
+# StudyBooking-Room — Vercel + Turso
 
-This version is prepared so the Expo web frontend and Node API can be deployed from the same Vercel project.
+This version keeps the Expo web frontend and Node API in one Vercel project and moves the persistent SQLite database to Turso (libSQL).
 
-## Vercel settings
+## 1. Create Turso database
+Create a Turso database and obtain:
+- `TURSO_DATABASE_URL`
+- `TURSO_AUTH_TOKEN`
 
+## 2. Vercel project
 - Root Directory: `.`
 - Build Command: `npx expo export -p web`
 - Output Directory: `dist`
 - Install Command: `npm install`
 
-The backend entry point is `server.js` at the repository root, which Vercel can detect as a Node server.
+## 3. Environment variables
+Set these in Vercel:
+- `TURSO_DATABASE_URL`
+- `TURSO_AUTH_TOKEN`
+- `TOKEN_SECRET` (long random secret)
+- `EXPO_PUBLIC_API_URL` = your Vercel deployment URL, e.g. `https://your-project.vercel.app`
 
-## Environment variables
+The API is available under the same domain, for example `/api/health`, `/api/auth/login`, `/api/auth/register`, `/api/rooms`, and `/api/bookings`.
 
-Set `TOKEN_SECRET` to a long random value.
+## 4. Important
+The Vercel backend no longer uses `server/studyroom.db` for production data. Turso is the persistent database. The old local SQLite backend is kept as `server/server.local.js` so `npm run server` still works locally.
 
-Set `EXPO_PUBLIC_API_URL` to the deployed Vercel URL, for example:
+## 5. First test
+Open `https://YOUR-PROJECT.vercel.app/api/health`. It should return JSON with `ok: true` and `database: "turso"`. Then test registration, login, room listing, booking and cancellation.
 
-`https://YOUR-PROJECT.vercel.app`
-
-## IMPORTANT database note
-
-The current backend still uses SQLite (`server/studyroom.db`). On Vercel, the default path is `/tmp/studyroom.db`, which is writable but ephemeral. This means this ZIP is suitable for testing the Vercel deployment and API, but **SQLite data is not guaranteed to survive cold starts/redeployments**.
-
-For a real online system where registrations and bookings must persist permanently, migrate the SQLite database to a persistent hosted database such as Turso (SQLite/libSQL), Neon/Postgres, or Supabase. Do not treat `/tmp/studyroom.db` as production persistent storage.
-
-## Local behavior
-
-`npm run server` still runs the original backend from `server/server.js` and uses `server/studyroom.db` by default.
+## WebSocket
+The original local backend used a `ws` server. The Vercel API version intentionally does not depend on a long-lived Node WebSocket server; core authentication and booking APIs remain HTTP based. The frontend can continue to run its WebSocket attempt and fall back to normal API refresh behavior.
