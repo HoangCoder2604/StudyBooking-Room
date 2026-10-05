@@ -8,7 +8,8 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "server": "node server/server.js",
-    "test:api": "node server/integration-test.js"
+    "test:api": "node server/integration-test.js",
+    "server:vercel": "node server.js"
   },
   "dependencies": {
     "@expo/metro-runtime": "~6.1.2",
