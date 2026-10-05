@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "StudyRoom Booking",
+    "slug": "study-room-booking",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#F4F7FB"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#F4F7FB"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "@react-native-community/datetimepicker",
+      "expo-notifications"
+    ]
+  }
+}
