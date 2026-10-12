@@ -1,7 +1,11 @@
 import { Platform } from 'react-native';
 
-const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000';
-export const API_URL = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+// Web production: same-origin /api routes. Native: set EXPO_PUBLIC_API_URL.
+const DEFAULT_API_URL = Platform.OS === 'web'
+  ? (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
+      ? window.location.origin : 'http://localhost:4000')
+  : (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000');
+export const API_URL = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/$/, '');
 
 export async function apiRequest(path, { token, method = 'GET', body, signal } = {}) {
   let response;

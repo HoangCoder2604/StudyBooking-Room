@@ -57,6 +57,15 @@ export function BookingProvider({ children }) {
       }).catch(()=>{});
     } else disableNotifications().catch(()=>{});
 
+    // Vercel Functions do not host persistent WebSocket servers. Poll over HTTPS instead.
+    const isCloud = API_URL.startsWith('https://');
+    if (isCloud) {
+      const timer = setInterval(() => {
+        refreshBookings().catch(() => {});
+        if (lastFilters.current) searchRooms(lastFilters.current).catch(() => {});
+      }, 15000);
+      return () => clearInterval(timer);
+    }
     const socketUrl = `${API_URL.replace(/^http/, 'ws')}/ws?token=${encodeURIComponent(token)}`;
     let socket;
     let reconnectTimer;

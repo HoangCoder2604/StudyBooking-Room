@@ -25,6 +25,13 @@ async function initDb() {
 `CREATE INDEX IF NOT EXISTS idx_booking_conflict ON bookings(room_id, date, status, start_time, end_time)`,
 `CREATE TABLE IF NOT EXISTS push_tokens (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, platform TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`
   ];
+  statements.push(`CREATE TRIGGER IF NOT EXISTS prevent_overlapping_bookings
+    BEFORE INSERT ON bookings
+    WHEN NEW.status = 'confirmed' AND EXISTS (
+      SELECT 1 FROM bookings WHERE room_id = NEW.room_id AND date = NEW.date
+      AND status = 'confirmed' AND start_time < NEW.end_time AND end_time > NEW.start_time
+    )
+    BEGIN SELECT RAISE(ABORT, 'BOOKING_CONFLICT'); END`);
   for (const sql of statements) await exec(sql);
 }
 function ensureDb() { if (!initPromise) initPromise = initDb().then(seedRooms).then(seedUsers); return initPromise; }
@@ -100,6 +107,10 @@ function send(res, status, data) {
 }
 
 async function body(req) {
+  if (req.body !== undefined) {
+    if (typeof req.body === 'object' && req.body !== null) return req.body;
+    if (typeof req.body === 'string') return JSON.parse(req.body || '{}');
+  }
   const chunks = [];
   let length = 0;
   for await (const chunk of req) {
@@ -169,7 +180,7 @@ async function releaseExpiredBookings() {
     WHERE status = 'confirmed'
       AND datetime(date || ' ' || end_time) <= datetime('now', 'localtime')
     RETURNING id, user_id, room_id, date, end_time
-  `).all();
+  `);
   if (expired.length) {
     broadcastEvent({ type:'rooms_updated', reason:'booking_completed' });
     for (const item of expired) {
@@ -186,9 +197,9 @@ async function handler(req, res) {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   const url = new URL(req.url || '/', `https://${req.headers.host || 'vercel.local'}`);
 
-  await ensureDb();
-
   try {
+    if (!TURSO_DATABASE_URL || !TURSO_AUTH_TOKEN) return send(res, 503, { message: 'Chưa cấu hình TURSO_DATABASE_URL / TURSO_AUTH_TOKEN trên Vercel.' });
+    await ensureDb();
     if (req.method === 'GET' && url.pathname === '/api/health') {
       return send(res, 200, { ok: true, database: 'turso', time: new Date().toISOString() });
     }
@@ -314,7 +325,9 @@ async function handler(req, res) {
         sendExpoPush(user.id, event.title, event.message, { bookingId:id, type:event.type });
         return send(res, 201, { booking: bookingDto(created) });
       } catch (error) {
-
+        if (String(error.message).includes('BOOKING_CONFLICT')) {
+          return send(res, 409, { code: 'BOOKING_CONFLICT', message: 'Phòng vừa được người khác đặt. Vui lòng chọn giờ hoặc phòng khác.' });
+        }
         throw error;
       }
     }
